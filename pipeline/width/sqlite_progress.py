@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 
-WIDTH_PROGRESS_VERSION = 1
+WIDTH_PROGRESS_VERSION = 2
 
 
 def _file_signature(path):

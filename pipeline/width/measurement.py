@@ -1,4 +1,8 @@
+import math
+from dataclasses import dataclass
+
 import numpy as np
+import shapely
 from shapely.geometry import LineString
 
 from pipeline.width.skeleton import get_direction_at_distance, get_representative_line
@@ -96,20 +100,70 @@ def width_at_point_by_center_segment(polygon, center_point, direction, max_width
     return (best_segment.length, full_normal_line, best_segment)
 
 
-def measure_width_along_edge_with_processed_polygon(edge_line, processed_polygon, step, max_width):
+@dataclass(frozen=True)
+class MeasurementPlan:
+    distances: np.ndarray
+    centers: np.ndarray
+    normals: np.ndarray
+    normal_lines: np.ndarray
+
+
+def prepare_measurement_plan(edge_line, step, max_width):
     edge_line = get_representative_line(edge_line)
-    measurements = []
     if edge_line is None or edge_line.length == 0:
-        return measurements
+        return MeasurementPlan(np.empty(0), np.empty((0, 2)), np.empty((0, 2)), np.empty(0, dtype=object))
     distances = np.arange(0, edge_line.length + 1e-06, step)
-    for distance in distances:
-        center = edge_line.interpolate(float(distance))
-        direction = get_direction_at_distance(line=edge_line, distance=float(distance))
-        if direction is None:
-            continue
-        width_px, full_normal_line, width_segment = width_at_point_by_center_segment(polygon=processed_polygon, center_point=center, direction=direction, max_width=max_width)
-        measurements.append({'distance_along_edge': float(distance), 'center': (center.x, center.y), 'width_px': width_px, 'full_normal_line': full_normal_line, 'intersection': width_segment})
+    center_points = shapely.line_interpolate_point(edge_line, distances)
+    centers = shapely.get_coordinates(center_points)
+    before = shapely.get_coordinates(shapely.line_interpolate_point(edge_line, np.maximum(0, distances - 3.0)))
+    after = shapely.get_coordinates(shapely.line_interpolate_point(edge_line, np.minimum(edge_line.length, distances + 3.0)))
+    delta = after - before
+    lengths = np.asarray([math.hypot(x, y) for x, y in delta])
+    usable = lengths != 0
+    distances = distances[usable]
+    centers = centers[usable]
+    directions = delta[usable] / lengths[usable, None]
+    normals = np.column_stack((-directions[:, 1], directions[:, 0]))
+    endpoints = np.stack((centers - normals * max_width, centers + normals * max_width), axis=1)
+    lines = shapely.linestrings(endpoints) if len(endpoints) else np.empty(0, dtype=object)
+    return MeasurementPlan(distances, centers, normals, lines)
+
+
+def measure_with_plan(plan, polygon):
+    if not len(plan.distances):
+        return []
+    intersections = shapely.intersection(plan.normal_lines, polygon)
+    measurements = []
+    for i, intersection in enumerate(intersections):
+        cx, cy = plan.centers[i]
+        nx, ny = plan.normals[i]
+        best_segment = None
+        best_distance = float('inf')
+        for segment in iter_lines_from_intersection(intersection):
+            coords = list(segment.coords)
+            if len(coords) < 2:
+                continue
+            t_values = [(x - cx) * nx + (y - cy) * ny for x, y in coords]
+            t_min, t_max = min(t_values), max(t_values)
+            if t_min <= 0 <= t_max:
+                best_segment = segment
+                break
+            distance_to_center = min(abs(t_min), abs(t_max))
+            if distance_to_center < best_distance:
+                best_distance = distance_to_center
+                best_segment = segment
+        measurements.append({
+            'distance_along_edge': float(plan.distances[i]),
+            'center': (float(cx), float(cy)),
+            'width_px': None if best_segment is None else best_segment.length,
+            'full_normal_line': plan.normal_lines[i],
+            'intersection': intersection if best_segment is None else best_segment,
+        })
     return measurements
+
+
+def measure_width_along_edge_with_processed_polygon(edge_line, processed_polygon, step, max_width):
+    return measure_with_plan(prepare_measurement_plan(edge_line, step, max_width), processed_polygon)
 
 
 def width_quality(measurements):

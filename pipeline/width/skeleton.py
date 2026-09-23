@@ -2,6 +2,7 @@ import math
 
 import cv2
 import numpy as np
+import shapely
 from shapely import affinity
 from shapely.geometry import LineString
 from shapely.ops import nearest_points
@@ -234,7 +235,21 @@ def split_line_to_segments(line):
     return segments
 
 
-def evaluate_translation_against_axis(edge_line, axis_segments, dx, dy, edge_step=10, max_match_distance=120, min_parallel_cos=0.75):
+def _prepare_axis_data(axis_segments):
+    usable = []
+    for segment in axis_segments:
+        direction = segment_direction(segment)
+        if direction is not None:
+            usable.append((segment, direction))
+    geometries = np.empty(len(usable), dtype=object)
+    directions = np.empty((len(usable), 2), dtype=float)
+    for i, (segment, direction) in enumerate(usable):
+        geometries[i] = segment
+        directions[i] = direction
+    return geometries, directions
+
+
+def evaluate_translation_against_axis(edge_line, axis_segments, dx, dy, edge_step=10, max_match_distance=120, min_parallel_cos=0.75, _axis_data=None):
     translated_edge = translate_edge_line(edge_line=edge_line, dx=dx, dy=dy)
     if translated_edge is None or translated_edge.is_empty:
         return None
@@ -244,33 +259,39 @@ def evaluate_translation_against_axis(edge_line, axis_segments, dx, dy, edge_ste
     edge_segments = split_line_to_segments(dense_edge)
     if not edge_segments:
         return None
+    axis_geoms, axis_dirs = _prepare_axis_data(axis_segments) if _axis_data is None else _axis_data
     matches = []
-    for edge_segment in edge_segments:
-        edge_direction = segment_direction(edge_segment)
-        if edge_direction is None:
+    batch_rows = max(1, 65536 // max(len(axis_geoms), 1))
+    for offset in range(0, len(edge_segments), batch_rows):
+        group = edge_segments[offset:offset + batch_rows]
+        directions = [segment_direction(segment) for segment in group]
+        usable_indices = [i for i, direction in enumerate(directions) if direction is not None]
+        if not usable_indices or not len(axis_geoms):
             continue
-        ex, ey = edge_direction
-        edge_midpoint = edge_segment.interpolate(0.5, normalized=True)
-        best_match = None
-        best_score = -1e+18
-        for axis_segment in axis_segments:
-            axis_direction = segment_direction(axis_segment)
-            if axis_direction is None:
+        dirs = np.asarray([directions[i] for i in usable_indices], dtype=float)
+        midpoints = np.asarray([group[i].interpolate(0.5, normalized=True) for i in usable_indices], dtype=object)
+        dots = np.abs(dirs[:, 0, None] * axis_dirs[None, :, 0] + dirs[:, 1, None] * axis_dirs[None, :, 1])
+        eligible = dots >= min_parallel_cos
+        distances = np.full(dots.shape, np.inf, dtype=float)
+        shapely.distance(midpoints[:, None], axis_geoms[None, :], out=distances, where=eligible)
+        eligible &= distances <= max_match_distance
+        scores = np.where(eligible, dots * 10.0 - distances / max(max_match_distance, 1), -np.inf)
+        best_axis = scores.argmax(axis=1)
+        for row, group_index in enumerate(usable_indices):
+            ai = int(best_axis[row])
+            score = float(scores[row, ai])
+            if not score > -1e18:
                 continue
-            ax, ay = axis_direction
-            dot = abs(ex * ax + ey * ay)
-            if dot < min_parallel_cos:
-                continue
-            distance = edge_midpoint.distance(axis_segment)
-            if distance > max_match_distance:
-                continue
+            edge_segment = group[group_index]
+            edge_midpoint = midpoints[row]
+            axis_segment = axis_geoms[ai]
             _, axis_point = nearest_points(edge_midpoint, axis_segment)
-            score = dot * 10.0 - distance / max(max_match_distance, 1)
-            if score > best_score:
-                best_score = score
-                best_match = {'edge_segment': edge_segment, 'axis_segment': axis_segment, 'edge_point': edge_midpoint, 'axis_point': axis_point, 'edge_direction': edge_direction, 'axis_direction': axis_direction, 'dot': dot, 'distance': distance, 'score': score}
-        if best_match is not None:
-            matches.append(best_match)
+            matches.append({
+                'edge_segment': edge_segment, 'axis_segment': axis_segment,
+                'edge_point': edge_midpoint, 'axis_point': axis_point,
+                'edge_direction': directions[group_index], 'axis_direction': tuple(axis_dirs[ai]),
+                'dot': float(dots[row, ai]), 'distance': float(distances[row, ai]), 'score': score,
+            })
     coverage_ratio = len(matches) / len(edge_segments)
     if not matches:
         return {'translated_edge': translated_edge, 'edge_segments': edge_segments, 'matches': [], 'coverage_ratio': coverage_ratio, 'mean_dot': 0.0, 'mean_distance': None}
@@ -286,6 +307,7 @@ def estimate_best_global_translation_from_axis(edge_line, axis_segments, edge_st
     edge_segments = split_line_to_segments(dense_edge)
     if not edge_segments:
         return None
+    axis_data = _prepare_axis_data(axis_segments)
     clusters = {}
     for edge_segment in edge_segments:
         edge_direction = segment_direction(edge_segment)
@@ -333,7 +355,7 @@ def estimate_best_global_translation_from_axis(edge_line, axis_segments, edge_st
     best = None
     best_score = -1e+18
     for candidate in candidates:
-        evaluation = evaluate_translation_against_axis(edge_line=edge_line, axis_segments=axis_segments, dx=candidate['dx'], dy=candidate['dy'], edge_step=edge_step, max_match_distance=max_match_distance, min_parallel_cos=min_parallel_cos)
+        evaluation = evaluate_translation_against_axis(edge_line=edge_line, axis_segments=axis_segments, dx=candidate['dx'], dy=candidate['dy'], edge_step=edge_step, max_match_distance=max_match_distance, min_parallel_cos=min_parallel_cos, _axis_data=axis_data)
         if evaluation is None:
             continue
         mean_distance = evaluation['mean_distance']

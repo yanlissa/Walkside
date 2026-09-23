@@ -5,7 +5,8 @@ from shapely.geometry import LineString
 from shapely.ops import split
 
 from pipeline.width.measurement import (
-    measure_width_along_edge_with_processed_polygon,
+    prepare_measurement_plan,
+    measure_with_plan,
     width_quality,
 )
 from pipeline.width.polygons import polygon_parts
@@ -81,11 +82,11 @@ def split_polygon_by_line(polygon, cut_line, min_area):
     return pieces
 
 
-def split_and_keep_edge_piece(polygon, split_line, edge_line, edge_buffer, min_area_after_split, min_removed_area, max_removed_area_ratio):
+def split_and_keep_edge_piece(polygon, split_line, edge_line, edge_buffer, min_area_after_split, min_removed_area, max_removed_area_ratio, _edge_area=None):
     pieces = split_polygon_by_line(polygon=polygon, cut_line=split_line, min_area=min_area_after_split)
     if len(pieces) <= 1:
         return None
-    edge_area = edge_line.buffer(edge_buffer)
+    edge_area = edge_line.buffer(edge_buffer) if _edge_area is None else _edge_area
     kept_piece = max(pieces, key=lambda piece: piece.intersection(edge_area).area)
     removed_pieces = [piece for piece in pieces if piece is not kept_piece]
     removed_area = sum((piece.area for piece in removed_pieces))
@@ -97,7 +98,11 @@ def split_and_keep_edge_piece(polygon, split_line, edge_line, edge_buffer, min_a
     return (kept_piece, removed_pieces)
 
 
-def find_best_local_cut(polygon, edge_line, step, max_width, simplify_tolerance, angle_threshold, min_parallel_cos, split_extension, edge_buffer, min_area_after_split, min_removed_area, max_removed_area_ratio, local_direction_delta, max_cut_distance_to_edge, min_valid_ratio):
+def find_best_local_cut(polygon, edge_line, step, max_width, simplify_tolerance, angle_threshold, min_parallel_cos, split_extension, edge_buffer, min_area_after_split, min_removed_area, max_removed_area_ratio, local_direction_delta, max_cut_distance_to_edge, min_valid_ratio, _measurement_plan=None, _edge_area=None):
+    if _measurement_plan is None:
+        _measurement_plan = prepare_measurement_plan(edge_line, step, max_width)
+    if _edge_area is None:
+        _edge_area = edge_line.buffer(edge_buffer)
     simplified = polygon.simplify(tolerance=simplify_tolerance, preserve_topology=True)
     if not simplified.is_valid:
         simplified = simplified.buffer(0)
@@ -126,11 +131,11 @@ def find_best_local_cut(polygon, edge_line, step, max_width, simplify_tolerance,
                 if parallel_cos < min_parallel_cos:
                     continue
                 split_line = extend_segment_between_points(point_a=point_a, point_b=point_b, extension=split_extension)
-                split_result = split_and_keep_edge_piece(polygon=polygon, split_line=split_line, edge_line=edge_line, edge_buffer=edge_buffer, min_area_after_split=min_area_after_split, min_removed_area=min_removed_area, max_removed_area_ratio=max_removed_area_ratio)
+                split_result = split_and_keep_edge_piece(polygon=polygon, split_line=split_line, edge_line=edge_line, edge_buffer=edge_buffer, min_area_after_split=min_area_after_split, min_removed_area=min_removed_area, max_removed_area_ratio=max_removed_area_ratio, _edge_area=_edge_area)
                 if split_result is None:
                     continue
                 candidate_polygon, removed_pieces = split_result
-                measurements = measure_width_along_edge_with_processed_polygon(edge_line=edge_line, processed_polygon=candidate_polygon, step=step, max_width=max_width)
+                measurements = measure_with_plan(_measurement_plan, candidate_polygon)
                 quality = width_quality(measurements)
                 if quality['valid_ratio'] < min_valid_ratio:
                     continue
@@ -143,13 +148,15 @@ def find_best_local_cut(polygon, edge_line, step, max_width, simplify_tolerance,
 
 def iterative_local_cuts(polygon, edge_line, step=10, max_width=120, max_cuts=5, simplify_tolerance=20.0, angle_threshold=0.0, min_parallel_cos=0.75, split_extension=5, edge_buffer=5, min_area_after_split=20, min_removed_area=50, max_removed_area_ratio=0.75, local_direction_delta=25.0, max_cut_distance_to_edge=120.0, min_valid_ratio=0.5, min_rel_mae_improvement=0.03, min_valid_ratio_keep=0.8):
     edge_line = get_representative_line(edge_line)
+    measurement_plan = prepare_measurement_plan(edge_line, step, max_width)
+    edge_area = None if edge_line is None else edge_line.buffer(edge_buffer)
     current_polygon = polygon
     accepted_cuts = []
     removed_pieces_all = []
-    current_measurements = measure_width_along_edge_with_processed_polygon(edge_line=edge_line, processed_polygon=current_polygon, step=step, max_width=max_width)
+    current_measurements = measure_with_plan(measurement_plan, current_polygon)
     current_quality = width_quality(current_measurements)
     for _ in range(max_cuts):
-        best_cut = find_best_local_cut(polygon=current_polygon, edge_line=edge_line, step=step, max_width=max_width, simplify_tolerance=simplify_tolerance, angle_threshold=angle_threshold, min_parallel_cos=min_parallel_cos, split_extension=split_extension, edge_buffer=edge_buffer, min_area_after_split=min_area_after_split, min_removed_area=min_removed_area, max_removed_area_ratio=max_removed_area_ratio, local_direction_delta=local_direction_delta, max_cut_distance_to_edge=max_cut_distance_to_edge, min_valid_ratio=min_valid_ratio)
+        best_cut = find_best_local_cut(polygon=current_polygon, edge_line=edge_line, step=step, max_width=max_width, simplify_tolerance=simplify_tolerance, angle_threshold=angle_threshold, min_parallel_cos=min_parallel_cos, split_extension=split_extension, edge_buffer=edge_buffer, min_area_after_split=min_area_after_split, min_removed_area=min_removed_area, max_removed_area_ratio=max_removed_area_ratio, local_direction_delta=local_direction_delta, max_cut_distance_to_edge=max_cut_distance_to_edge, min_valid_ratio=min_valid_ratio, _measurement_plan=measurement_plan, _edge_area=edge_area)
         if best_cut is None:
             break
         old_rel_mae = current_quality['rel_mae']
