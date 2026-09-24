@@ -300,7 +300,29 @@ def evaluate_translation_against_axis(edge_line, axis_segments, dx, dy, edge_ste
     return {'translated_edge': translated_edge, 'edge_segments': edge_segments, 'matches': matches, 'coverage_ratio': float(coverage_ratio), 'mean_dot': mean_dot, 'mean_distance': mean_distance}
 
 
-def estimate_best_global_translation_from_axis(edge_line, axis_segments, edge_step=10, max_candidate_distance=220, max_match_distance=120, min_parallel_cos=0.75, shift_cluster_radius=12, max_candidates=250, shift_length_weight=0.001):
+def _evaluate_scored_translation_candidate(
+    edge_line, axis_segments, axis_data, candidate,
+    edge_step, max_match_distance, min_parallel_cos, shift_length_weight,
+):
+    """One candidate; the archived evaluation and scoring formula are unchanged."""
+    evaluation = evaluate_translation_against_axis(
+        edge_line=edge_line, axis_segments=axis_segments,
+        dx=candidate['dx'], dy=candidate['dy'], edge_step=edge_step,
+        max_match_distance=max_match_distance, min_parallel_cos=min_parallel_cos,
+        _axis_data=axis_data,
+    )
+    if evaluation is None:
+        return None
+    mean_distance = evaluation['mean_distance']
+    if mean_distance is None:
+        mean_distance_norm = 1.0
+    else:
+        mean_distance_norm = mean_distance / max(max_match_distance, 1)
+    score = 2.0 * evaluation['coverage_ratio'] + 0.8 * evaluation['mean_dot'] - 0.6 * mean_distance_norm - shift_length_weight * candidate['shift_length'] - 0.1 * candidate['shift_std'] / max(edge_step, 1)
+    return {**candidate, **evaluation, 'global_score': float(score)}
+
+
+def estimate_best_global_translation_from_axis(edge_line, axis_segments, edge_step=10, max_candidate_distance=220, max_match_distance=120, min_parallel_cos=0.75, shift_cluster_radius=12, max_candidates=250, shift_length_weight=0.001, translation_pool=None):
     dense_edge = densify_line(line=edge_line, step=edge_step)
     if dense_edge is None:
         return None
@@ -352,23 +374,29 @@ def estimate_best_global_translation_from_axis(edge_line, axis_segments, edge_st
         seed_score = len(dxs) * 2.0 + float(np.mean(dots)) * 5.0 - float(np.mean(distances)) / max(max_candidate_distance, 1) - shift_length_weight * shift_length - 0.05 * shift_std / max(edge_step, 1)
         candidates.append({'dx': dx, 'dy': dy, 'shift_length': shift_length, 'shift_std': shift_std, 'seed_score': seed_score, 'cluster_count': len(dxs)})
     candidates = sorted(candidates, key=lambda item: item['seed_score'], reverse=True)[:max_candidates]
+    if translation_pool is not None and translation_pool.should_parallelize(len(candidates)):
+        return translation_pool.evaluate_best(
+            edge_line=edge_line,
+            axis_segments=axis_segments,
+            axis_data=axis_data,
+            candidates=candidates,
+            edge_step=edge_step,
+            max_match_distance=max_match_distance,
+            min_parallel_cos=min_parallel_cos,
+            shift_length_weight=shift_length_weight,
+        )
     best = None
     best_score = -1e+18
     for candidate in candidates:
-        evaluation = evaluate_translation_against_axis(edge_line=edge_line, axis_segments=axis_segments, dx=candidate['dx'], dy=candidate['dy'], edge_step=edge_step, max_match_distance=max_match_distance, min_parallel_cos=min_parallel_cos, _axis_data=axis_data)
-        if evaluation is None:
-            continue
-        mean_distance = evaluation['mean_distance']
-        if mean_distance is None:
-            mean_distance_norm = 1.0
-        else:
-            mean_distance_norm = mean_distance / max(max_match_distance, 1)
-        score = 2.0 * evaluation['coverage_ratio'] + 0.8 * evaluation['mean_dot'] - 0.6 * mean_distance_norm - shift_length_weight * candidate['shift_length'] - 0.1 * candidate['shift_std'] / max(edge_step, 1)
-        item = {**candidate, **evaluation, 'global_score': float(score)}
-        if score > best_score:
-            best_score = score
+        item = _evaluate_scored_translation_candidate(
+            edge_line, axis_segments, axis_data, candidate,
+            edge_step, max_match_distance, min_parallel_cos, shift_length_weight,
+        )
+        if item is not None and item['global_score'] > best_score:
+            best_score = item['global_score']
             best = item
     return best
+
 
 
 def translate_edge_line(edge_line, dx, dy):
@@ -378,14 +406,14 @@ def translate_edge_line(edge_line, dx, dy):
     return affinity.translate(edge_line, xoff=dx, yoff=dy)
 
 
-def score_edge_against_polygon_axis_by_dot(edge_line, polygon, skeleton_pad=5, skeleton_min_line_length=3.0, axis_simplify_tolerance=8.0, axis_min_segment_length=8.0, edge_step=10, max_match_distance=120, min_parallel_cos=0.75, distance_sigma=120.0):
+def score_edge_against_polygon_axis_by_dot(edge_line, polygon, skeleton_pad=5, skeleton_min_line_length=3.0, axis_simplify_tolerance=8.0, axis_min_segment_length=8.0, edge_step=10, max_match_distance=120, min_parallel_cos=0.75, distance_sigma=120.0, translation_pool=None):
     skeleton_lines = build_polygon_skeleton_lines(polygon=polygon, pad=skeleton_pad, min_line_length=skeleton_min_line_length)
     axis_segments = approximate_axis_lines(skeleton_lines=skeleton_lines, simplify_tolerance=axis_simplify_tolerance, min_segment_length=axis_min_segment_length)
     if not axis_segments:
         axis_segments = skeleton_lines
     if not axis_segments:
         return {'axis_status': 'no_axis_segments', 'axis_score': 0.0, 'mean_dot': 0.0, 'coverage_ratio': 0.0, 'mean_distance': None, 'shift_dx': None, 'shift_dy': None, 'shift_length': None, 'shift_std': None, 'translated_edge': None, 'skeleton_lines': skeleton_lines, 'axis_segments': axis_segments, 'edge_segments': [], 'matches': []}
-    translation = estimate_best_global_translation_from_axis(edge_line=edge_line, axis_segments=axis_segments, edge_step=edge_step, max_candidate_distance=max_match_distance * 2.0, max_match_distance=max_match_distance, min_parallel_cos=min_parallel_cos, shift_cluster_radius=12, max_candidates=250, shift_length_weight=0.001)
+    translation = estimate_best_global_translation_from_axis(edge_line=edge_line, axis_segments=axis_segments, edge_step=edge_step, max_candidate_distance=max_match_distance * 2.0, max_match_distance=max_match_distance, min_parallel_cos=min_parallel_cos, shift_cluster_radius=12, max_candidates=250, shift_length_weight=0.001, translation_pool=translation_pool)
     if translation is None:
         dense_edge = densify_line(line=edge_line, step=edge_step)
         edge_segments = [] if dense_edge is None else split_line_to_segments(dense_edge)

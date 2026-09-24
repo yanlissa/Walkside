@@ -1,6 +1,8 @@
 import time
 from pathlib import Path
 
+from config import WIDTH_TRANSLATION_WORKERS, WIDTH_USE_CHECKPOINT
+
 from pipeline.graph.load import load_graph_edges
 from pipeline.graph.update import update_geojson_widths_gpd
 from pipeline.inference.model import load_inference_model
@@ -14,6 +16,7 @@ from pipeline.tiles.selection import (
 )
 from pipeline.tiles.sources import create_tile_source
 from pipeline.width.calculate import calculate_widths_by_edge
+from pipeline.width.translation_parallel import TranslationCandidatePool
 from pipeline.width.sqlite_progress import build_width_run_key
 
 
@@ -354,25 +357,31 @@ class PipelineRunner:
                 tile_size=tile_size,
             )
 
-            width_result = calculate_widths_by_edge(
-                edges=edges,
-                edge_tile_index=edge_tile_index,
-                cache_images_dir=cache_images["images_dir"],
-                cache_labels_dir=mask_result["labels_dir"],
-                z=z,
-                tile_size=tile_size,
-                log_callback=self.log,
-                stop_requested=self.stop_requested,
-                pause_wait=self.pause_wait,
-                progress_callback=lambda current, total: self.report_progress(
-                    stage,
-                    current,
-                    total,
-                    f"Обработано рёбер: {current}/{total}",
-                ),
-                progress_db_path=width_progress_db_path,
-                progress_run_key=width_run_key,
+            self.log(
+                f"Перенос: исполнителей {WIDTH_TRANSLATION_WORKERS}; "
+                "рёбра обрабатываются последовательно."
             )
+            with TranslationCandidatePool(workers=WIDTH_TRANSLATION_WORKERS) as translation_pool:
+                width_result = calculate_widths_by_edge(
+                    translation_pool=translation_pool,
+                    edges=edges,
+                    edge_tile_index=edge_tile_index,
+                    cache_images_dir=cache_images["images_dir"],
+                    cache_labels_dir=mask_result["labels_dir"],
+                    z=z,
+                    tile_size=tile_size,
+                    log_callback=self.log,
+                    stop_requested=self.stop_requested,
+                    pause_wait=self.pause_wait,
+                    progress_callback=lambda current, total: self.report_progress(
+                        stage,
+                        current,
+                        total,
+                        f"Обработано рёбер: {current}/{total}",
+                    ),
+                    progress_db_path=(width_progress_db_path if WIDTH_USE_CHECKPOINT else None),
+                    progress_run_key=(width_run_key if WIDTH_USE_CHECKPOINT else None),
+                )
 
             if width_result["cancelled"] or not self.checkpoint():
                 return {"cancelled": True}

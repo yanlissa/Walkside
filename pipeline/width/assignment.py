@@ -14,7 +14,7 @@ def edge_to_linestring(edge):
     return LineString(points)
 
 
-def assign_edge_to_sidewalk_polygon(edge_line, sidewalk_polygons, edge_buffer=10, max_distance=160, axis_weight=800.0, skeleton_pad=5, skeleton_min_line_length=3.0, axis_simplify_tolerance=8.0, axis_min_segment_length=8.0, edge_step=10, max_match_distance=120, min_parallel_cos=0.75, min_coverage_ratio=0.25):
+def assign_edge_to_sidewalk_polygon(edge_line, sidewalk_polygons, edge_buffer=10, max_distance=160, axis_weight=800.0, skeleton_pad=5, skeleton_min_line_length=3.0, axis_simplify_tolerance=8.0, axis_min_segment_length=8.0, edge_step=10, max_match_distance=120, min_parallel_cos=0.75, min_coverage_ratio=0.25, translation_pool=None):
     if edge_line is None or edge_line.is_empty:
         return (None, {'status': 'empty_edge', 'score': None, 'base_score': None, 'distance': None, 'axis_info': None, 'translated_edge': None})
     best_poly = None
@@ -32,7 +32,7 @@ def assign_edge_to_sidewalk_polygon(edge_line, sidewalk_polygons, edge_buffer=10
         line_intersection = edge_line.intersection(poly)
         intersection_length = 0.0 if line_intersection.is_empty else line_intersection.length
         base_score = intersection_area + intersection_length * 10.0 - distance * 0.5
-        axis_info = score_edge_against_polygon_axis_by_dot(edge_line=edge_line, polygon=poly, skeleton_pad=skeleton_pad, skeleton_min_line_length=skeleton_min_line_length, axis_simplify_tolerance=axis_simplify_tolerance, axis_min_segment_length=axis_min_segment_length, edge_step=edge_step, max_match_distance=max_match_distance, min_parallel_cos=min_parallel_cos, distance_sigma=max_match_distance)
+        axis_info = score_edge_against_polygon_axis_by_dot(edge_line=edge_line, polygon=poly, skeleton_pad=skeleton_pad, skeleton_min_line_length=skeleton_min_line_length, axis_simplify_tolerance=axis_simplify_tolerance, axis_min_segment_length=axis_min_segment_length, edge_step=edge_step, max_match_distance=max_match_distance, min_parallel_cos=min_parallel_cos, distance_sigma=max_match_distance, translation_pool=translation_pool)
         if axis_info['coverage_ratio'] < min_coverage_ratio:
             score = base_score - axis_weight * 0.5
         else:
@@ -137,9 +137,9 @@ def find_crosswalk_direct_target(edge_line, crosswalk_polygons, min_crosswalk_ra
     return {'use_crosswalk': True, 'crosswalk_ratio': best_ratio, 'crosswalk_polygon': best_polygon, 'crosswalk_line': crosswalk_line}
 
 
-def process_edge_for_sidewalk_width(edge, sidewalk_polygons, edge_buffer=8, max_distance=40, step=10, max_width=100, fallback_to_nearest=True, min_translated_inside_ratio=0.5, translated_inside_tolerance=2.0):
+def process_edge_for_sidewalk_width(edge, sidewalk_polygons, edge_buffer=8, max_distance=40, step=10, max_width=100, fallback_to_nearest=True, min_translated_inside_ratio=0.5, translated_inside_tolerance=2.0, translation_pool=None):
     edge_line = edge_to_linestring(edge)
-    polygon, assign_info = assign_edge_to_sidewalk_polygon(edge_line=edge_line, sidewalk_polygons=sidewalk_polygons, edge_buffer=edge_buffer, max_distance=max_distance)
+    polygon, assign_info = assign_edge_to_sidewalk_polygon(edge_line=edge_line, sidewalk_polygons=sidewalk_polygons, edge_buffer=edge_buffer, max_distance=max_distance, translation_pool=translation_pool)
     if polygon is None:
         return {'edge': edge, 'edge_line': edge_line, 'translated_edge_line': None, 'polygon': None, 'assign_info': assign_info, 'measurements': [], 'snapped_line': None, 'work_line': None, 'snap_mode': 'no_polygon'}
     translated_edge_line = assign_info.get('translated_edge')
@@ -165,8 +165,8 @@ def process_edge_for_sidewalk_width(edge, sidewalk_polygons, edge_buffer=8, max_
     return {'edge': edge, 'edge_line': edge_line, 'translated_edge_line': translated_edge_line, 'polygon': polygon, 'assign_info': assign_info, 'measurements': [], 'snapped_line': work_line, 'work_line': work_line, 'snap_mode': snap_mode, 'translated_inside_ratio': translated_inside_ratio, 'min_translated_inside_ratio': min_translated_inside_ratio}
 
 
-def strongly_simplify_assigned_polygon(edge, sidewalk_polygons, simplify_tolerance, edge_buffer, max_distance, step, max_width, fallback_to_nearest):
-    edge_result = process_edge_for_sidewalk_width(edge=edge, sidewalk_polygons=sidewalk_polygons, edge_buffer=edge_buffer, max_distance=max_distance, step=step, max_width=max_width, fallback_to_nearest=fallback_to_nearest)
+def strongly_simplify_assigned_polygon(edge, sidewalk_polygons, simplify_tolerance, edge_buffer, max_distance, step, max_width, fallback_to_nearest, translation_pool=None):
+    edge_result = process_edge_for_sidewalk_width(edge=edge, sidewalk_polygons=sidewalk_polygons, edge_buffer=edge_buffer, max_distance=max_distance, step=step, max_width=max_width, fallback_to_nearest=fallback_to_nearest, translation_pool=translation_pool)
     if edge_result.get('skip_reason') is not None:
         return {'status': edge_result['skip_reason'], 'edge_result': edge_result, 'polygon': edge_result.get('polygon'), 'simplified_polygon': None}
     polygon = edge_result['polygon']

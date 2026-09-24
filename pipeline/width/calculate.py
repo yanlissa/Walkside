@@ -25,7 +25,7 @@ STATUS_TEXT = {
 }
 
 
-def calculate_width_for_edge(edge, sidewalk_polygons, crosswalk_polygons=None, crosswalk_min_ratio=0.3, crosswalk_tolerance=0.0, edge_buffer=10, max_distance=50, step=10, max_width=120, fallback_to_nearest=True, strong_simplify_tolerance=20, angle_threshold=0.0, min_parallel_cos=0.75, split_extension=5, edge_buffer_for_keep=5, min_area_after_split=20, min_removed_area=50, max_removed_area_ratio=0.75, max_cuts=5, min_rel_mae_improvement=0.03, min_valid_ratio=0.5, min_valid_ratio_keep=0.8, local_direction_delta=25.0, max_cut_distance_to_edge=120.0, min_crosswalk_width_m=3.5, pixel_size_m=0.08):
+def calculate_width_for_edge(edge, sidewalk_polygons, crosswalk_polygons=None, crosswalk_min_ratio=0.3, crosswalk_tolerance=0.0, edge_buffer=10, max_distance=50, step=10, max_width=120, fallback_to_nearest=True, strong_simplify_tolerance=20, angle_threshold=0.0, min_parallel_cos=0.75, split_extension=5, edge_buffer_for_keep=5, min_area_after_split=20, min_removed_area=50, max_removed_area_ratio=0.75, max_cuts=5, min_rel_mae_improvement=0.03, min_valid_ratio=0.5, min_valid_ratio_keep=0.8, local_direction_delta=25.0, max_cut_distance_to_edge=120.0, min_crosswalk_width_m=3.5, pixel_size_m=0.08, translation_pool=None):
     edge_line = edge_to_linestring(edge)
     crosswalk_target = {'use_crosswalk': False, 'crosswalk_ratio': 0.0, 'crosswalk_polygon': None, 'crosswalk_line': None}
 
@@ -59,6 +59,7 @@ def calculate_width_for_edge(edge, sidewalk_polygons, crosswalk_polygons=None, c
         step=step,
         max_width=max_width,
         fallback_to_nearest=fallback_to_nearest,
+        translation_pool=translation_pool,
     )
 
     if simplified_result['status'] != 'ok':
@@ -181,6 +182,7 @@ def calculate_widths_for_edges(
     local_direction_delta=25.0,
     max_cut_distance_to_edge=120.0,
     pixel_size_m=0.08,
+    translation_pool=None,
 ):
     sidewalk_polygons, sidewalk_mask, mask_rgb = build_better_polygons_from_mask_image(
         mask_img=mask_mosaic,
@@ -227,6 +229,7 @@ def calculate_widths_for_edges(
             local_direction_delta=local_direction_delta,
             max_cut_distance_to_edge=max_cut_distance_to_edge,
             pixel_size_m=pixel_size_m,
+            translation_pool=translation_pool,
         )
 
         width_results.append(width_result)
@@ -303,6 +306,7 @@ def calculate_widths_by_edge(
     progress_callback=None,
     progress_db_path=None,
     progress_run_key=None,
+    translation_pool=None,
 ):
     all_width_results = []
     edge_results = []
@@ -475,6 +479,7 @@ def calculate_widths_by_edge(
             local_direction_delta=local_direction_delta,
             max_cut_distance_to_edge=max_cut_distance_to_edge,
             pixel_size_m=pixel_size_m,
+            translation_pool=translation_pool,
         )
 
         edge_width_results = widths["width_results"]
