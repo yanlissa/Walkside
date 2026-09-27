@@ -10,12 +10,12 @@ def _evaluate_candidate_batch(
     edge_line, axis_segments, axis_data, indexed_candidates,
     edge_step, max_match_distance, min_parallel_cos, shift_length_weight,
 ):
-    from pipeline.width.skeleton import _evaluate_scored_translation_candidate
+    from pipeline.width.skeleton import _evaluate_compact_scored_translation_candidate
 
     best = None
     best_score = -1e+18
     for candidate_index, candidate in indexed_candidates:
-        item = _evaluate_scored_translation_candidate(
+        item = _evaluate_compact_scored_translation_candidate(
             edge_line, axis_segments, axis_data, candidate,
             edge_step, max_match_distance, min_parallel_cos, shift_length_weight,
         )
@@ -105,4 +105,11 @@ class TranslationCandidatePool:
             for future in futures:
                 future.cancel()
             raise
-        return None if best is None else best[1]
+        if best is None:
+            return None
+        from pipeline.width.skeleton import _evaluate_scored_translation_candidate
+        _, winner = best
+        return _evaluate_scored_translation_candidate(
+            edge_line, axis_segments, axis_data, winner,
+            edge_step, max_match_distance, min_parallel_cos, shift_length_weight,
+        )

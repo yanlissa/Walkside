@@ -209,30 +209,30 @@ def densify_line(line, step=10):
     if line is None or line.is_empty or line.length == 0:
         return None
     distances = np.arange(0, line.length + 1e-06, step)
-    points = []
-    for distance in distances:
-        point = line.interpolate(float(distance))
-        points.append((point.x, point.y))
-    end = line.interpolate(line.length)
-    end_point = (end.x, end.y)
-    if not points or points[-1] != end_point:
-        points.append(end_point)
-    if len(points) < 2:
+    points = shapely.line_interpolate_point(line, distances)
+    coords = shapely.get_coordinates(points)
+    end = shapely.line_interpolate_point(line, line.length)
+    end_coords = shapely.get_coordinates(end)
+    if len(end_coords):
+        end_point = end_coords[0]
+        if not len(coords) or not np.array_equal(coords[-1], end_point):
+            coords = np.vstack((coords, end_point))
+    if len(coords) < 2:
         return None
-    return LineString(points)
+    return LineString(coords)
 
 
 def split_line_to_segments(line):
     line = get_representative_line(line)
     if line is None or line.is_empty:
         return []
-    coords = list(line.coords)
-    segments = []
-    for p1, p2 in zip(coords[:-1], coords[1:]):
-        segment = LineString([p1, p2])
-        if segment.length > 0:
-            segments.append(segment)
-    return segments
+    coords = np.asarray(line.coords, dtype=float)
+    if len(coords) < 2:
+        return []
+    pair_coords = np.stack((coords[:-1], coords[1:]), axis=1)
+    segments = shapely.linestrings(pair_coords)
+    lengths = shapely.length(segments)
+    return list(segments[np.asarray(lengths) > 0])
 
 
 def _prepare_axis_data(axis_segments):
@@ -300,6 +300,65 @@ def evaluate_translation_against_axis(edge_line, axis_segments, dx, dy, edge_ste
     return {'translated_edge': translated_edge, 'edge_segments': edge_segments, 'matches': matches, 'coverage_ratio': float(coverage_ratio), 'mean_dot': mean_dot, 'mean_distance': mean_distance}
 
 
+def _evaluate_compact_scored_translation_candidate(
+    edge_line, axis_segments, axis_data, candidate,
+    edge_step, max_match_distance, min_parallel_cos, shift_length_weight,
+):
+    translated_edge = translate_edge_line(edge_line=edge_line, dx=candidate['dx'], dy=candidate['dy'])
+    if translated_edge is None or translated_edge.is_empty:
+        return None
+    dense_edge = densify_line(line=translated_edge, step=edge_step)
+    if dense_edge is None:
+        return None
+    coords = np.asarray(dense_edge.coords, dtype=float)
+    if len(coords) < 2:
+        return None
+    starts = coords[:-1]
+    ends = coords[1:]
+    delta = ends - starts
+    lengths = np.hypot(delta[:, 0], delta[:, 1])
+    usable = lengths > 0
+    if not np.any(usable):
+        return None
+    starts = starts[usable]
+    ends = ends[usable]
+    delta = delta[usable]
+    lengths = lengths[usable]
+    dirs = delta / lengths[:, None]
+    midpoints = shapely.points((starts + ends) * 0.5)
+    axis_geoms, axis_dirs = axis_data
+    if not len(axis_geoms):
+        coverage_ratio = 0.0
+        mean_dot = 0.0
+        mean_distance = None
+    else:
+        dots = np.abs(dirs[:, 0, None] * axis_dirs[None, :, 0] + dirs[:, 1, None] * axis_dirs[None, :, 1])
+        eligible = dots >= min_parallel_cos
+        distances = np.full(dots.shape, np.inf, dtype=float)
+        shapely.distance(midpoints[:, None], axis_geoms[None, :], out=distances, where=eligible)
+        eligible &= distances <= max_match_distance
+        scores = np.where(eligible, dots * 10.0 - distances / max(max_match_distance, 1), -np.inf)
+        best_axis = scores.argmax(axis=1)
+        rows = np.arange(len(best_axis))
+        valid = scores[rows, best_axis] > -1e18
+        matched_count = int(np.count_nonzero(valid))
+        coverage_ratio = matched_count / len(lengths)
+        if matched_count == 0:
+            mean_dot = 0.0
+            mean_distance = None
+        else:
+            valid_rows = rows[valid]
+            valid_axis = best_axis[valid]
+            mean_dot = float(np.mean(dots[valid_rows, valid_axis]))
+            mean_distance = float(np.mean(distances[valid_rows, valid_axis]))
+    if mean_distance is None:
+        mean_distance_norm = 1.0
+    else:
+        mean_distance_norm = mean_distance / max(max_match_distance, 1)
+    score = 2.0 * coverage_ratio + 0.8 * mean_dot - 0.6 * mean_distance_norm - shift_length_weight * candidate['shift_length'] - 0.1 * candidate['shift_std'] / max(edge_step, 1)
+    return {**candidate, 'coverage_ratio': float(coverage_ratio), 'mean_dot': mean_dot, 'mean_distance': mean_distance, 'global_score': float(score)}
+
+
 def _evaluate_scored_translation_candidate(
     edge_line, axis_segments, axis_data, candidate,
     edge_step, max_match_distance, min_parallel_cos, shift_length_weight,
@@ -326,38 +385,54 @@ def estimate_best_global_translation_from_axis(edge_line, axis_segments, edge_st
     dense_edge = densify_line(line=edge_line, step=edge_step)
     if dense_edge is None:
         return None
-    edge_segments = split_line_to_segments(dense_edge)
-    if not edge_segments:
+    coords = np.asarray(dense_edge.coords, dtype=float)
+    if len(coords) < 2:
         return None
+    starts = coords[:-1]
+    ends = coords[1:]
+    delta = ends - starts
+    lengths = np.hypot(delta[:, 0], delta[:, 1])
+    usable = lengths > 0
+    if not np.any(usable):
+        return None
+    starts = starts[usable]
+    ends = ends[usable]
+    delta = delta[usable]
+    lengths = lengths[usable]
+    edge_dirs = delta / lengths[:, None]
+    midpoint_coords = (starts + ends) * 0.5
+    edge_midpoints = shapely.points(midpoint_coords)
     axis_data = _prepare_axis_data(axis_segments)
+    axis_geoms, axis_dirs = axis_data
+    if not len(axis_geoms):
+        return None
+    dots = np.abs(edge_dirs[:, 0, None] * axis_dirs[None, :, 0] + edge_dirs[:, 1, None] * axis_dirs[None, :, 1])
+    eligible = dots >= min_parallel_cos
+    distances = np.full(dots.shape, np.inf, dtype=float)
+    shapely.distance(edge_midpoints[:, None], axis_geoms[None, :], out=distances, where=eligible)
+    eligible &= distances <= max_candidate_distance
+    pair_rows, pair_cols = np.nonzero(eligible)
+    if not len(pair_rows):
+        return None
+    shortest = shapely.shortest_line(edge_midpoints[pair_rows], axis_geoms[pair_cols])
+    axis_points = shapely.get_point(shortest, 1)
+    axis_coords = shapely.get_coordinates(axis_points)
+    shifts = axis_coords - midpoint_coords[pair_rows]
+    pair_dots = dots[pair_rows, pair_cols]
+    pair_distances = distances[pair_rows, pair_cols]
     clusters = {}
-    for edge_segment in edge_segments:
-        edge_direction = segment_direction(edge_segment)
-        if edge_direction is None:
-            continue
-        ex, ey = edge_direction
-        edge_midpoint = edge_segment.interpolate(0.5, normalized=True)
-        for axis_segment in axis_segments:
-            axis_direction = segment_direction(axis_segment)
-            if axis_direction is None:
-                continue
-            ax, ay = axis_direction
-            dot = abs(ex * ax + ey * ay)
-            if dot < min_parallel_cos:
-                continue
-            distance = edge_midpoint.distance(axis_segment)
-            if distance > max_candidate_distance:
-                continue
-            _, axis_point = nearest_points(edge_midpoint, axis_segment)
-            dx = axis_point.x - edge_midpoint.x
-            dy = axis_point.y - edge_midpoint.y
-            key = (int(round(dx / shift_cluster_radius)), int(round(dy / shift_cluster_radius)))
-            if key not in clusters:
-                clusters[key] = {'dxs': [], 'dys': [], 'dots': [], 'distances': []}
-            clusters[key]['dxs'].append(dx)
-            clusters[key]['dys'].append(dy)
-            clusters[key]['dots'].append(dot)
-            clusters[key]['distances'].append(distance)
+    for (dx, dy), dot, distance in zip(shifts, pair_dots, pair_distances):
+        dx = float(dx)
+        dy = float(dy)
+        dot = float(dot)
+        distance = float(distance)
+        key = (int(round(dx / shift_cluster_radius)), int(round(dy / shift_cluster_radius)))
+        if key not in clusters:
+            clusters[key] = {'dxs': [], 'dys': [], 'dots': [], 'distances': []}
+        clusters[key]['dxs'].append(dx)
+        clusters[key]['dys'].append(dy)
+        clusters[key]['dots'].append(dot)
+        clusters[key]['distances'].append(distance)
     if not clusters:
         return None
     candidates = []
@@ -388,14 +463,19 @@ def estimate_best_global_translation_from_axis(edge_line, axis_segments, edge_st
     best = None
     best_score = -1e+18
     for candidate in candidates:
-        item = _evaluate_scored_translation_candidate(
+        item = _evaluate_compact_scored_translation_candidate(
             edge_line, axis_segments, axis_data, candidate,
             edge_step, max_match_distance, min_parallel_cos, shift_length_weight,
         )
         if item is not None and item['global_score'] > best_score:
             best_score = item['global_score']
             best = item
-    return best
+    if best is None:
+        return None
+    return _evaluate_scored_translation_candidate(
+        edge_line, axis_segments, axis_data, best,
+        edge_step, max_match_distance, min_parallel_cos, shift_length_weight,
+    )
 
 
 
