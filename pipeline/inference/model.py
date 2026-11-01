@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+from importlib import import_module
 import platform
 import sys
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Callable
 
+import numpy as np
 import torch
 
-from pipeline.inference.architecture import get_seg_model
+from pipeline.inference.architecture import (
+    CLASS_NAMES,
+    DEFAULT_MODEL_CONFIG,
+    TileSegmentationModel,
+)
 
 
 LogCallback = Callable[[str], None]
@@ -117,12 +125,45 @@ def verify_cuda_runtime(device: torch.device) -> None:
         ) from exc
 
 
-def build_model(num_classes: int = 4, device: torch.device | None = None):
+def read_checkpoint(weights_path) -> Mapping:
+    path = Path(weights_path)
+
+    try:
+        scalar_type = import_module("numpy._core.multiarray").scalar
+    except (ImportError, AttributeError):
+        scalar_type = import_module("numpy.core.multiarray").scalar
+        
+    numpy_safe_types = [
+        scalar_type,
+        (scalar_type, "numpy.core.multiarray.scalar"),
+        np.dtype,
+        type(np.dtype("float64")),
+        type(np.dtype("float32")),
+    ]
+    with torch.serialization.safe_globals(numpy_safe_types):
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+
+    if not isinstance(checkpoint, Mapping):
+        raise TypeError("Checkpoint должен содержать словарь с параметрами модели")
+    if "class_names" in checkpoint and tuple(checkpoint["class_names"]) != CLASS_NAMES:
+        raise ValueError(
+            f"В checkpoint другой порядок классов: {checkpoint['class_names']}"
+        )
+    return checkpoint
+
+
+def build_model(
+    num_classes: int = 4,
+    device: torch.device | None = None,
+    config: Mapping | None = None,
+):
+    if num_classes != len(CLASS_NAMES):
+        raise ValueError(f"TileSegmentationModel рассчитана на {len(CLASS_NAMES)} класса")
     if device is None:
         device, _ = resolve_device("auto")
 
-    model = get_seg_model(num_classes=num_classes)
-    return model.to(device)
+    options = dict(DEFAULT_MODEL_CONFIG if config is None else config)
+    return TileSegmentationModel(**options).to(device)
 
 
 def load_weights_to_library_model(
@@ -130,66 +171,51 @@ def load_weights_to_library_model(
     weights_path,
     device: torch.device,
     log_callback: LogCallback | None = None,
+    checkpoint: Mapping | None = None,
 ):
     log = log_callback or print
     log(f"Загрузка весов: {weights_path}")
+    if checkpoint is None:
+        checkpoint = read_checkpoint(weights_path)
 
-    # Загрузка на CPU уменьшает пиковое потребление памяти GPU. load_state_dict
-    # сам скопирует подходящие тензоры в параметры модели на выбранном device.
-    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=False)
+    state_dict = checkpoint
+    for field in ("state_dict", "model_state_dict", "model"):
+        if isinstance(checkpoint.get(field), Mapping):
+            state_dict = checkpoint[field]
+            break
 
-    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    else:
-        state_dict = checkpoint
-
-    if not isinstance(state_dict, dict):
-        raise TypeError("Файл весов не содержит словарь state_dict")
-
-    model_dict = model.state_dict()
-    new_state_dict = {}
-
-    loaded_keys = []
-    skipped_keys = []
-
+    cleaned_state = {}
     for key, value in state_dict.items():
-        clean_key = key.replace("model.", "").replace("backbone.", "").replace("module.", "")
+        if not isinstance(key, str) or not torch.is_tensor(value):
+            raise TypeError(f"Некорректный параметр в state_dict: {key}")
 
-        matched_key = None
+        clean_key = key
+        while clean_key.startswith(("module.", "model.", "_orig_mod.")):
+            clean_key = clean_key.split(".", 1)[1]
+        if clean_key in cleaned_state:
+            raise RuntimeError(f"Повторяющийся параметр после очистки: {clean_key}")
+        cleaned_state[clean_key] = value
 
-        if clean_key in model_dict:
-            matched_key = clean_key
-        else:
-            for model_key in model_dict.keys():
-                if model_key.endswith(clean_key):
-                    matched_key = model_key
-                    break
-
-        if matched_key is None:
-            skipped_keys.append((key, "no matching key"))
-            continue
-
-        if not hasattr(value, "shape"):
-            skipped_keys.append((key, "checkpoint value is not a tensor"))
-            continue
-
-        if model_dict[matched_key].shape != value.shape:
-            skipped_keys.append((
-                key,
-                f"shape mismatch: ckpt {tuple(value.shape)} vs model {tuple(model_dict[matched_key].shape)}",
-            ))
-            continue
-
-        new_state_dict[matched_key] = value
-        loaded_keys.append(matched_key)
-
-    model.load_state_dict(new_state_dict, strict=False)
-
-    if not loaded_keys:
+    expected = model.state_dict()
+    missing = [
+        key for key in expected
+        if key not in cleaned_state and not key.endswith("num_batches_tracked")
+    ]
+    unexpected = [key for key in cleaned_state if key not in expected]
+    wrong_shapes = [
+        key for key in cleaned_state
+        if key in expected and cleaned_state[key].shape != expected[key].shape
+    ]
+    if missing or unexpected or wrong_shapes:
         raise RuntimeError(
-            "Файл параметров несовместим с текущей версией приложения"
+            "Веса несовместимы с TileSegmentationModel: "
+            f"нет ключей {missing[:10]}, "
+            f"лишние ключи {unexpected[:10]}, "
+            f"размеры не совпадают {wrong_shapes[:10]}"
         )
-    
+
+    model.load_state_dict(cleaned_state, strict=False)
+    log(f"Загружено параметров модели: {len(cleaned_state)}")
     return model
 
 
@@ -236,9 +262,15 @@ def load_inference_model(
 
     # Модель и параметры сначала загружаются на CPU.
     # Так ошибка CUDA не мешает прочитать файл параметров.
+    checkpoint = read_checkpoint(weights_path)
+    model_config = checkpoint.get("config", DEFAULT_MODEL_CONFIG)
+    if not isinstance(model_config, Mapping):
+        raise TypeError("Поле config в checkpoint должно быть словарём")
+    log(f"Конфигурация новой модели: {dict(model_config)}")
     model = build_model(
         num_classes=num_classes,
         device=cpu_device,
+        config=model_config,
     )
 
     model = load_weights_to_library_model(
@@ -246,6 +278,7 @@ def load_inference_model(
         weights_path=weights_path,
         device=cpu_device,
         log_callback=log,
+        checkpoint=checkpoint,
     )
 
     # После загрузки пытаемся перенести готовую модель на GPU.
@@ -278,6 +311,7 @@ def load_inference_model(
             model = build_model(
                 num_classes=num_classes,
                 device=cpu_device,
+                config=model_config,
             )
 
             # При повторной загрузке не дублируем сообщения.
@@ -286,6 +320,7 @@ def load_inference_model(
                 weights_path=weights_path,
                 device=cpu_device,
                 log_callback=lambda _message: None,
+                checkpoint=checkpoint,
             )
 
     model.eval()

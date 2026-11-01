@@ -57,7 +57,9 @@ def predict_mask(model, device, image_path):
     with torch.inference_mode():
         output = model(image_tensor)
 
-        if isinstance(output, (list, tuple)):
+        if isinstance(output, dict):
+            output = output["main"]
+        elif isinstance(output, (list, tuple)):
             output = output[0]
 
         output = F.interpolate(
