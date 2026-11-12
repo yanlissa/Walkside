@@ -21,6 +21,8 @@ def build_better_polygons_from_mask_image(
     min_area=100,
     simplify_tolerance=4.0,
     smooth_radius=2,
+    return_holes=False,
+    min_hole_area=25,
 ):
     img_rgb = np.array(mask_img.convert("RGB"))
 
@@ -58,16 +60,36 @@ def build_better_polygons_from_mask_image(
             kernel,
         )
 
-    contours, _ = cv2.findContours(
+    contours, hierarchy = cv2.findContours(
         combined_mask,
-        cv2.RETR_EXTERNAL,
+        cv2.RETR_TREE if return_holes else cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_NONE,
     )
 
     polygons = []
+    holes = []
 
-    for contour in contours:
-        if cv2.contourArea(contour) < min_area:
+    for index, contour in enumerate(contours):
+        area = cv2.contourArea(contour)
+
+        # Внутренние контуры сохраняем отдельно: они не должны влиять
+        # на подбор полигона, поиск оси и итеративные разрезы.
+        if return_holes and hierarchy is not None:
+            parent = hierarchy[0, index, 3]
+            if parent >= 0:
+                # Только отверстия первого уровня. Вложенные островки
+                # не являются внешними полигонами RETR_EXTERNAL.
+                is_hole = hierarchy[0, parent, 3] == -1
+                if is_hole and area >= min_hole_area:
+                    points = cv2.approxPolyDP(contour, 1.0, True).reshape(-1, 2)
+                    if len(points) >= 3:
+                        hole = Polygon(points)
+                        if not hole.is_valid:
+                            hole = hole.buffer(0)
+                        holes.extend(polygon_parts(hole))
+                continue
+
+        if area < min_area:
             continue
 
         exterior = contour.reshape(-1, 2)
@@ -102,4 +124,6 @@ def build_better_polygons_from_mask_image(
         reverse=True,
     )
 
+    if return_holes:
+        return polygons, combined_mask, img_rgb, holes
     return polygons, combined_mask, img_rgb

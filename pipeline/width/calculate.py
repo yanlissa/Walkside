@@ -8,12 +8,15 @@ from pipeline.width.cuts import iterative_local_cuts
 from pipeline.width.measurement import (
     calculate_crosswalk_width_for_edge,
     estimate_width_from_narrow_measurements,
+    measure_with_plan,
+    prepare_measurement_plan,
 )
 from pipeline.width.mosaic import build_width_context_for_edge
 from pipeline.width.polygons import build_better_polygons_from_mask_image
 from pipeline.width.sqlite_progress import SQLiteWidthProgress
 
 import numpy as np
+import shapely
 
 
 STATUS_TEXT = {
@@ -25,7 +28,7 @@ STATUS_TEXT = {
 }
 
 
-def calculate_width_for_edge(edge, sidewalk_polygons, crosswalk_polygons=None, crosswalk_min_ratio=0.3, crosswalk_tolerance=0.0, edge_buffer=10, max_distance=50, step=10, max_width=120, fallback_to_nearest=True, strong_simplify_tolerance=20, angle_threshold=0.0, min_parallel_cos=0.75, split_extension=5, edge_buffer_for_keep=5, min_area_after_split=20, min_removed_area=50, max_removed_area_ratio=0.75, max_cuts=5, min_rel_mae_improvement=0.03, min_valid_ratio=0.5, min_valid_ratio_keep=0.8, local_direction_delta=25.0, max_cut_distance_to_edge=120.0, min_crosswalk_width_m=3.5, pixel_size_m=0.08, translation_pool=None):
+def calculate_width_for_edge(edge, sidewalk_polygons, crosswalk_polygons=None, crosswalk_min_ratio=0.3, crosswalk_tolerance=0.0, edge_buffer=10, max_distance=50, step=10, max_width=120, fallback_to_nearest=True, strong_simplify_tolerance=20, angle_threshold=0.0, min_parallel_cos=0.75, split_extension=5, edge_buffer_for_keep=5, min_area_after_split=20, min_removed_area=50, max_removed_area_ratio=0.75, max_cuts=5, min_rel_mae_improvement=0.03, min_valid_ratio=0.5, min_valid_ratio_keep=0.8, local_direction_delta=25.0, max_cut_distance_to_edge=120.0, min_crosswalk_width_m=3.5, pixel_size_m=0.08, translation_pool=None, holes_tree=None):
     edge_line = edge_to_linestring(edge)
     crosswalk_target = {'use_crosswalk': False, 'crosswalk_ratio': 0.0, 'crosswalk_polygon': None, 'crosswalk_line': None}
 
@@ -99,6 +102,27 @@ def calculate_width_for_edge(edge, sidewalk_polygons, crosswalk_polygons=None, c
         min_rel_mae_improvement=min_rel_mae_improvement,
         min_valid_ratio_keep=min_valid_ratio_keep,
     )
+
+    # Разрезы уже подобраны по исходному полигону. Только теперь
+    # ограничиваем итоговые локальные ширины внутренними пустотами.
+    if holes_tree is not None:
+        segments = np.asarray([
+            m['intersection'] for m in multi_cut_result['measurements']
+            if m['width_px'] is not None
+        ], dtype=object)
+        if len(segments):
+            pairs = holes_tree.query(segments, predicate='intersects')
+            if pairs.size:
+                relevant_holes = holes_tree.geometries[np.unique(pairs[1])]
+                polygon_for_width = multi_cut_result['processed_polygon'].difference(
+                    shapely.union_all(relevant_holes)
+                )
+                plan = prepare_measurement_plan(work_line, step, max_width)
+                measurements = measure_with_plan(plan, polygon_for_width)
+                multi_cut_result['measurements'] = measurements
+                multi_cut_result['widths_px'] = [
+                    m['width_px'] for m in measurements if m['width_px'] is not None
+                ]
 
     widths_px = multi_cut_result['widths_px']
 
@@ -184,13 +208,15 @@ def calculate_widths_for_edges(
     pixel_size_m=0.08,
     translation_pool=None,
 ):
-    sidewalk_polygons, sidewalk_mask, mask_rgb = build_better_polygons_from_mask_image(
+    sidewalk_polygons, sidewalk_mask, mask_rgb, sidewalk_holes = build_better_polygons_from_mask_image(
         mask_img=mask_mosaic,
         target_colors=target_colors,
         min_area=min_area,
         simplify_tolerance=base_simplify_tolerance,
         smooth_radius=smooth_radius,
+        return_holes=True,
     )
+    holes_tree = shapely.STRtree(sidewalk_holes) if sidewalk_holes else None
 
     crosswalk_polygons, crosswalk_mask, _ = build_better_polygons_from_mask_image(
         mask_img=mask_mosaic,
@@ -230,6 +256,7 @@ def calculate_widths_for_edges(
             max_cut_distance_to_edge=max_cut_distance_to_edge,
             pixel_size_m=pixel_size_m,
             translation_pool=translation_pool,
+            holes_tree=holes_tree,
         )
 
         width_results.append(width_result)
