@@ -11,8 +11,9 @@ STAGE_RANGES = {
     "find_tiles": (10.0, 13.0),
     "prepare_tiles": (13.0, 22.0),
     "predict_masks": (22.0, 68.0),
-    "calculate_widths": (68.0, 98.0),
-    "update_graph": (98.0, 100.0),
+    "calculate_widths": (68.0, 96.0),
+    "restore_widths": (96.0, 99.0),
+    "update_graph": (99.0, 100.0),
 }
 
 

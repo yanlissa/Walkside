@@ -604,7 +604,7 @@ class MainWindow(QMainWindow):
         self.stage_progress_bar.setFormat("100%")
         self.stage_progress_detail.setText("Готово")
         self.state_title.setText("Завершено")
-        self.stage_label.setText(f"{STAGES[6].title}: результат сохранён")
+        self.stage_label.setText(f"{STAGES[-1].title}: результат сохранен")
 
         self.elapsed_value.setText(
             self.format_seconds(result["elapsed_seconds"])

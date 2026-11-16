@@ -16,6 +16,7 @@ from pipeline.tiles.selection import (
 )
 from pipeline.tiles.sources import create_tile_source
 from pipeline.width.calculate import calculate_widths_by_edge
+from pipeline.width.neighbors import restore_widths_from_neighbors
 from pipeline.width.translation_parallel import TranslationCandidatePool
 from pipeline.width.sqlite_progress import build_width_run_key
 
@@ -433,6 +434,43 @@ class PipelineRunner:
 
         stage = STAGES[6]
         self.set_stage(stage)
+        self.report_progress(stage, 0, 1, "Подготовка соседства графа")
+        started_at = time.perf_counter()
+
+        neighbor_result = restore_widths_from_neighbors(
+            all_edges=all_edges,
+            width_results=width_result["width_results"],
+            max_hops=3,
+            reference_latitude=55.69,
+            stop_requested=self.stop_requested,
+            pause_wait=self.pause_wait,
+            progress_callback=lambda current, total: self.report_progress(
+                stage,
+                current,
+                total,
+                f"Проверено ребер без ширины: {current}/{total}",
+            ),
+        )
+
+        if neighbor_result["cancelled"] or not self.checkpoint():
+            return {"cancelled": True}
+
+        final_width_results = neighbor_result["width_results"]
+        stage_times["restore_widths"] = time.perf_counter() - started_at
+        self.log(f"Опорных измерений по маскам: {neighbor_result['anchors']}")
+        self.log(
+            f"Восстановлено по соседям: {neighbor_result['restored']} "
+            f"из {neighbor_result['candidates']}"
+        )
+        self.log(f"Без подходящих соседей: {neighbor_result['unresolved']}")
+        self.log(
+            "Сохранено ранее заполненных ширин входного графа: "
+            f"{neighbor_result['preserved_existing']}"
+        )
+        self.report_progress(stage, 1, 1, "Поиск ширины через соседа завершен")
+
+        stage = STAGES[7]
+        self.set_stage(stage)
         self.report_progress(stage, 0, 1, "Запись GeoJSON")
         started_at = time.perf_counter()
 
@@ -441,8 +479,9 @@ class PipelineRunner:
         updated_gdf = update_geojson_widths_gpd(
             input_geojson_path=graph_path,
             output_geojson_path=output_geojson_path,
-            width_results=width_result["width_results"],
+            width_results=final_width_results,
             width_field="Width",
+            source_field="WidthSource",
         )
 
         stage_times["update_graph"] = time.perf_counter() - started_at
@@ -464,7 +503,9 @@ class PipelineRunner:
             "cache_images": cache_images,
             "mask_result": mask_result,
             "edge_results": width_result["edge_results"],
-            "width_results": width_result["width_results"],
+            "width_results": final_width_results,
+            "mask_width_results": width_result["width_results"],
+            "neighbor_result": neighbor_result,
             "updated_gdf": updated_gdf,
             "output_geojson_path": saved_graph_path,
             "stage_times": stage_times,
