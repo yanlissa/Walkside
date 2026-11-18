@@ -6,6 +6,16 @@ from PIL import Image
 from pipeline.tiles.coordinates import lonlat_to_yandex_tms_tile
 
 
+def sample_mask(array, points, default=0):
+    points = np.asarray(points)
+    ix = np.floor(points[:, 0] + 0.5).astype(int)
+    iy = np.floor(points[:, 1] + 0.5).astype(int)
+    ok = (ix >= 0) & (ix < array.shape[1]) & (iy >= 0) & (iy < array.shape[0])
+    out = np.full(len(points), default, dtype=array.dtype)
+    out[ok] = array[iy[ok], ix[ok]]
+    return out
+
+
 def find_cached_tile_path(base_dir, x, y, extensions):
     base_dir = Path(base_dir)
 
@@ -110,25 +120,6 @@ def edge_to_pixels(edge_coords, mosaic_info, z=20):
         )
 
     return pixel_points
-
-
-def overlay_mask_mosaic(image_mosaic, mask_mosaic, alpha=0.45, show_background=False):
-    image_rgb = np.array(image_mosaic.convert("RGB"), dtype=np.float32)
-    mask_rgb = np.array(mask_mosaic.convert("RGB"), dtype=np.float32)
-
-    if show_background:
-        mask_pixels = np.ones(mask_rgb.shape[:2], dtype=bool)
-    else:
-        mask_pixels = np.any(mask_rgb != np.array([0, 0, 0], dtype=np.float32), axis=-1)
-
-    output = image_rgb.copy()
-    output[mask_pixels] = (
-        (1.0 - alpha) * image_rgb[mask_pixels]
-        + alpha * mask_rgb[mask_pixels]
-    )
-    output = np.clip(output, 0, 255).astype(np.uint8)
-
-    return Image.fromarray(output)
 
 
 def point_inside_rect(px, py, width, height):

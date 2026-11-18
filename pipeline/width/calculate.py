@@ -5,14 +5,17 @@ from pipeline.width.assignment import (
     strongly_simplify_assigned_polygon,
 )
 from pipeline.width.cuts import iterative_local_cuts
+from pipeline.width.gap_fill import restore_mask_gaps
+from pipeline.width.joint_translation import joint_transfer
 from pipeline.width.measurement import (
     calculate_crosswalk_width_for_edge,
     estimate_width_from_narrow_measurements,
     measure_with_plan,
     prepare_measurement_plan,
 )
-from pipeline.width.mosaic import build_width_context_for_edge
+from pipeline.width.mosaic import build_width_context_for_edge, sample_mask
 from pipeline.width.polygons import build_better_polygons_from_mask_image
+from pipeline.width.skeleton import translate_edge_line
 from pipeline.width.sqlite_progress import SQLiteWidthProgress
 
 import numpy as np
@@ -22,13 +25,48 @@ import shapely
 STATUS_TEXT = {
     "no_polygon": "подходящий полигон не найден",
     "translated_edge_mostly_outside_polygon": "перенесённое ребро большей частью находится вне полигона",
+    "original_edge_mostly_outside_polygon": "исходное ребро большей частью находится вне полигона",
     "no_measurements": "не удалось получить измерения ширины",
     "no_tiles": "для ребра не найдены тайлы",
     "no_results": "результат расчёта отсутствует",
+    "insufficient_mask_width": "маска слишком узкая для надёжного измерения",
 }
 
 
-def calculate_width_for_edge(edge, sidewalk_polygons, crosswalk_polygons=None, crosswalk_min_ratio=0.3, crosswalk_tolerance=0.0, edge_buffer=10, max_distance=50, step=10, max_width=120, fallback_to_nearest=True, strong_simplify_tolerance=20, angle_threshold=0.0, min_parallel_cos=0.75, split_extension=5, edge_buffer_for_keep=5, min_area_after_split=20, min_removed_area=50, max_removed_area_ratio=0.75, max_cuts=5, min_rel_mae_improvement=0.03, min_valid_ratio=0.5, min_valid_ratio_keep=0.8, local_direction_delta=25.0, max_cut_distance_to_edge=120.0, min_crosswalk_width_m=3.5, pixel_size_m=0.08, translation_pool=None, holes_tree=None):
+def reliable_translation_result(result, foreground, known, pixel_size_m):
+    if result.get('width_m') is None:
+        return False
+    edge_result = result.get('simplified_result', {}).get('edge_result', {})
+    info = edge_result.get('assign_info', {})
+    line = edge_result.get('translated_edge_line')
+    if line is None:
+        line = edge_result.get('edge_line')
+    if line is None or line.is_empty or line.length <= 0:
+        return False
+    if (info.get('mean_dot') or 0.0) < 0.95 or info.get('mean_distance') is None:
+        return False
+    if info['mean_distance'] * pixel_size_m > max(1.0, 0.8 * result['width_m']):
+        return False
+    if np.hypot(info.get('shift_dx') or 0.0, info.get('shift_dy') or 0.0) * pixel_size_m > 20.0:
+        return False
+    distances = np.unique(np.r_[np.arange(0.0, line.length, 2.0), line.length])
+    centers = shapely.get_coordinates(shapely.line_interpolate_point(line, distances))
+    bounds = np.r_[0.0, (distances[:-1] + distances[1:]) / 2.0, line.length]
+    observed = sample_mask(known, centers, False)
+    if np.sum(np.diff(bounds) * observed) < 0.7 * line.length:
+        return False
+    supported = sample_mask(foreground, centers, False).astype(bool) & observed
+    if np.sum(np.diff(bounds) * supported) < 0.65 * line.length:
+        return False
+    widths = np.array([m['width_px'] for m in result.get('measurements', []) if m.get('width_px') is not None], dtype=float)
+    if len(widths) < 3 or len(widths) < 0.65 * len(result.get('measurements', [])):
+        return False
+    selected = np.array(result.get('narrow_width_stats', {}).get('selected_widths_px', widths), dtype=float)
+    middle = np.median(selected)
+    return bool(np.median(np.abs(selected - middle)) <= 0.35 * middle)
+
+
+def calculate_width_for_edge(edge, sidewalk_polygons, crosswalk_polygons=None, crosswalk_min_ratio=0.3, crosswalk_tolerance=0.0, edge_buffer=10, max_distance=50, step=10, max_width=120, fallback_to_nearest=True, strong_simplify_tolerance=20, angle_threshold=0.0, min_parallel_cos=0.75, split_extension=5, edge_buffer_for_keep=5, min_area_after_split=20, min_removed_area=50, max_removed_area_ratio=0.75, max_cuts=5, min_rel_mae_improvement=0.03, min_valid_ratio=0.5, min_valid_ratio_keep=0.8, local_direction_delta=25.0, max_cut_distance_to_edge=120.0, min_crosswalk_width_m=3.5, pixel_size_m=0.08, translation_pool=None, holes_tree=None, fixed_shift=None):
     edge_line = edge_to_linestring(edge)
     crosswalk_target = {'use_crosswalk': False, 'crosswalk_ratio': 0.0, 'crosswalk_polygon': None, 'crosswalk_line': None}
 
@@ -63,6 +101,7 @@ def calculate_width_for_edge(edge, sidewalk_polygons, crosswalk_polygons=None, c
         max_width=max_width,
         fallback_to_nearest=fallback_to_nearest,
         translation_pool=translation_pool,
+        fixed_shift=fixed_shift,
     )
 
     if simplified_result['status'] != 'ok':
@@ -146,7 +185,7 @@ def calculate_width_for_edge(edge, sidewalk_polygons, crosswalk_polygons=None, c
         measurements=multi_cut_result['measurements'],
         pixel_size_m=pixel_size_m,
         lower_quantile=0.15,
-        upper_quantile=0.65,
+        upper_quantile=0.70,
         min_count=3,
     )
 
@@ -157,9 +196,13 @@ def calculate_width_for_edge(edge, sidewalk_polygons, crosswalk_polygons=None, c
         width_px = float(np.median(widths_px))
         width_m = round(width_px * pixel_size_m, 2)
 
+    if width_px < 5.0:
+        width_px = None
+        width_m = None
+
     return {
         'edge': edge,
-        'status': 'ok',
+        'status': 'ok' if width_m is not None else 'insufficient_mask_width',
         'width_m': width_m,
         'width_px': width_px,
         'width_mode': 'combined',
@@ -207,6 +250,9 @@ def calculate_widths_for_edges(
     max_cut_distance_to_edge=120.0,
     pixel_size_m=0.08,
     translation_pool=None,
+    joint_shift=False,
+    restore_gaps=False,
+    known_mask=None,
 ):
     sidewalk_polygons, sidewalk_mask, mask_rgb, sidewalk_holes = build_better_polygons_from_mask_image(
         mask_img=mask_mosaic,
@@ -226,14 +272,48 @@ def calculate_widths_for_edges(
         smooth_radius=smooth_radius,
     )
 
+    if joint_shift and known_mask is None:
+        known_mask = np.ones(sidewalk_mask.shape, dtype=bool)
+
     width_results = []
 
     for edge in selected_edges:
-        width_result = calculate_width_for_edge(
-            edge=edge,
-            sidewalk_polygons=sidewalk_polygons,
+        shift = None
+        edge_polygons = sidewalk_polygons
+        edge_holes = holes_tree
+
+        if joint_shift:
+            line = edge_to_linestring(edge)
+            transfer = joint_transfer(
+                line=line,
+                polygons=sidewalk_polygons,
+                foreground=sidewalk_mask,
+                known=known_mask,
+                pixel_size_m=pixel_size_m,
+                translation_pool=translation_pool,
+            )
+            shift = transfer["vector"]
+
+            if restore_gaps and (transfer["status"] == "translated" or transfer["reason"] == "Выбран нулевой вектор"):
+                restored, _ = restore_mask_gaps(
+                    mask_mosaic=mask_mosaic,
+                    line=translate_edge_line(line, *shift),
+                    known=known_mask,
+                    pixel_size_m=pixel_size_m,
+                )
+                if restored is not mask_mosaic:
+                    edge_polygons, _, _, holes = build_better_polygons_from_mask_image(
+                        mask_img=restored,
+                        target_colors=target_colors,
+                        min_area=min_area,
+                        simplify_tolerance=base_simplify_tolerance,
+                        smooth_radius=smooth_radius,
+                        return_holes=True,
+                    )
+                    edge_holes = shapely.STRtree(holes) if holes else None
+        width_parameters = dict(
             crosswalk_polygons=crosswalk_polygons,
-            crosswalk_min_ratio=0.5,
+            crosswalk_min_ratio=0.4,
             crosswalk_tolerance=2.0,
             edge_buffer=edge_buffer,
             max_distance=max_distance,
@@ -256,9 +336,25 @@ def calculate_widths_for_edges(
             max_cut_distance_to_edge=max_cut_distance_to_edge,
             pixel_size_m=pixel_size_m,
             translation_pool=translation_pool,
-            holes_tree=holes_tree,
         )
+        width_result = calculate_width_for_edge(edge=edge, sidewalk_polygons=edge_polygons, holes_tree=edge_holes, fixed_shift=shift, **width_parameters)
 
+        if joint_shift and width_result.get('width_m') is None:
+            fallback = calculate_width_for_edge(edge=edge, sidewalk_polygons=sidewalk_polygons, holes_tree=holes_tree, **width_parameters)
+            foreground = np.any([np.all(mask_rgb == color, axis=2) for color in target_colors], axis=0)
+            if reliable_translation_result(fallback, foreground, known_mask, pixel_size_m):
+                info = fallback['simplified_result']['edge_result']['assign_info']
+                shift = (info['shift_dx'], info['shift_dy'])
+                transfer = {'status': 'translated', 'reason': 'Подтверждён перенос по оси фрагмента'}
+                width_result = fallback
+
+        if joint_shift:
+            width_result.update({
+                "shift_dx": shift[0],
+                "shift_dy": shift[1],
+                "transfer_status": transfer["status"],
+                "transfer_reason": transfer["reason"],
+            })
         width_results.append(width_result)
 
     return {
@@ -279,6 +375,11 @@ def _compact_width_result(result, edge):
         "width_px": result.get("width_px"),
         "width_mode": result.get("width_mode"),
         "crosswalk_ratio": result.get("crosswalk_ratio"),
+        **{
+            key: result[key]
+            for key in ("shift_dx", "shift_dy", "transfer_status", "transfer_reason")
+            if key in result
+        },
     }
 
 
@@ -334,6 +435,8 @@ def calculate_widths_by_edge(
     progress_db_path=None,
     progress_run_key=None,
     translation_pool=None,
+    joint_shift=False,
+    restore_gaps=False,
 ):
     all_width_results = []
     edge_results = []
@@ -479,6 +582,15 @@ def calculate_widths_by_edge(
         if stop_requested is not None and stop_requested():
             return finish(True)
 
+        known_mask = None
+        if joint_shift:
+            mosaic = width_context["mosaic_info"]
+            known_mask = np.zeros((mosaic["height"], mosaic["width"]), dtype=bool)
+            for tile in edge_tiles:
+                x = (tile["x"] - mosaic["min_x"]) * tile_size
+                y = (tile["y"] - mosaic["min_y"]) * tile_size
+                known_mask[y:y + tile_size, x:x + tile_size] = True
+
         widths = calculate_widths_for_edges(
             selected_edges=width_context["selected_edges"],
             mask_mosaic=width_context["mask_mosaic"],
@@ -507,6 +619,9 @@ def calculate_widths_by_edge(
             max_cut_distance_to_edge=max_cut_distance_to_edge,
             pixel_size_m=pixel_size_m,
             translation_pool=translation_pool,
+            joint_shift=joint_shift,
+            restore_gaps=restore_gaps,
+            known_mask=known_mask,
         )
 
         edge_width_results = widths["width_results"]

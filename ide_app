@@ -1,0 +1,41 @@
+[33mcommit 9e4887e5f8d9d18dae620f2029664b0fba682c0e[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m
+Author: Елизавета Корнеева <KorneevaES1@ks.mos.ru>
+Date:   Mon Nov 16 15:10:53 2026 +0300
+
+    use neighbors for calculate width
+
+[33mcommit 3fe3a903bdc248959e442f351bcdff4ff77e74cb[m
+Author: Елизавета Корнеева <KorneevaES1@ks.mos.ru>
+Date:   Thu Nov 12 12:16:43 2026 +0300
+
+    fix improve width calculation
+
+[33mcommit 4ba954191193ce497ddfd5ca5f2aa132e872a665[m
+Author: Елизавета Корнеева <KorneevaES1@ks.mos.ru>
+Date:   Sun Nov 1 22:35:56 2026 +0300
+
+    update model architecture for new weights
+
+[33mcommit ca563e012cbaf57314d659b0b4ad205a1abb0a60[m
+Author: Елизавета Корнеева <KorneevaES1@ks.mos.ru>
+Date:   Mon Sep 28 01:15:10 2026 +0300
+
+    optimize parallel translation evaluation
+
+[33mcommit 3f52c4cbcc474521a98c025c299bad282d76c2a3[m
+Author: Елизавета Корнеева <KorneevaES1@ks.mos.ru>
+Date:   Thu Sep 24 10:22:52 2026 +0300
+
+    add parallel calculation
+
+[33mcommit f79071908b90284362f85fcc6b59a7e85f6f8dae[m
+Author: Елизавета Корнеева <KorneevaES1@ks.mos.ru>
+Date:   Wed Sep 23 12:24:18 2026 +0300
+
+    optimization algorithm
+
+[33mcommit e39c92585167f1061330fd618921e7aabfd6e9c8[m
+Author: Elizaveta Korneeva <yanovich.liza@yandex.ru>
+Date:   Mon Aug 17 15:11:04 2026 +0300
+
+    walkside app

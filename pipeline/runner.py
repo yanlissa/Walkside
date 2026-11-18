@@ -1,7 +1,12 @@
 import time
 from pathlib import Path
 
-from config import WIDTH_TRANSLATION_WORKERS, WIDTH_USE_CHECKPOINT
+from config import (
+    WIDTH_JOINT_TRANSFER,
+    WIDTH_RESTORE_MASK_GAPS,
+    WIDTH_TRANSLATION_WORKERS,
+    WIDTH_USE_CHECKPOINT,
+)
 
 from pipeline.graph.load import load_graph_edges
 from pipeline.graph.update import update_geojson_widths_gpd
@@ -358,6 +363,12 @@ class PipelineRunner:
                 tile_size=tile_size,
             )
 
+            if WIDTH_JOINT_TRANSFER:
+                width_run_key = (
+                    f"{width_run_key}:joint:"
+                    f"{WIDTH_RESTORE_MASK_GAPS}:polynomial"
+                )
+
             self.log(
                 f"Перенос: исполнителей {WIDTH_TRANSLATION_WORKERS}; "
                 "рёбра обрабатываются последовательно."
@@ -365,6 +376,8 @@ class PipelineRunner:
             with TranslationCandidatePool(workers=WIDTH_TRANSLATION_WORKERS) as translation_pool:
                 width_result = calculate_widths_by_edge(
                     translation_pool=translation_pool,
+                    joint_shift=WIDTH_JOINT_TRANSFER,
+                    restore_gaps=WIDTH_RESTORE_MASK_GAPS,
                     edges=edges,
                     edge_tile_index=edge_tile_index,
                     cache_images_dir=cache_images["images_dir"],

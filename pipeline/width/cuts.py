@@ -1,10 +1,10 @@
 import math
 
-import numpy as np
 from shapely.geometry import LineString
 from shapely.ops import split
 
 from pipeline.width.measurement import (
+    estimate_width_from_narrow_measurements,
     prepare_measurement_plan,
     measure_with_plan,
     width_quality,
@@ -32,8 +32,8 @@ def find_concave_vertices(polygon, angle_threshold=0.0):
         return []
     orientation = 1 if signed_polygon_area(coords) > 0 else -1
     concave_points = []
-    for i in range(1, len(coords) - 1):
-        p_prev = coords[i - 1]
+    for i in range(len(coords) - 1):
+        p_prev = coords[i - 1] if i else coords[-2]
         p = coords[i]
         p_next = coords[i + 1]
         ax = p[0] - p_prev[0]
@@ -103,6 +103,7 @@ def find_best_local_cut(polygon, edge_line, step, max_width, simplify_tolerance,
         _measurement_plan = prepare_measurement_plan(edge_line, step, max_width)
     if _edge_area is None:
         _edge_area = edge_line.buffer(edge_buffer)
+    current_width = estimate_width_from_narrow_measurements(measure_with_plan(_measurement_plan, polygon), lower_quantile=0.15, upper_quantile=0.70)['width_px']
     simplified = polygon.simplify(tolerance=simplify_tolerance, preserve_topology=True)
     if not simplified.is_valid:
         simplified = simplified.buffer(0)
@@ -138,6 +139,9 @@ def find_best_local_cut(polygon, edge_line, step, max_width, simplify_tolerance,
                 measurements = measure_with_plan(_measurement_plan, candidate_polygon)
                 quality = width_quality(measurements)
                 if quality['valid_ratio'] < min_valid_ratio:
+                    continue
+                candidate_width = estimate_width_from_narrow_measurements(measurements, lower_quantile=0.15, upper_quantile=0.70)['width_px']
+                if current_width is not None and candidate_width is not None and candidate_width > current_width * 1.2:
                     continue
                 candidate_score = quality['score'] + 0.05 * parallel_cos
                 candidate = {'score': float(candidate_score), 'processed_polygon': candidate_polygon, 'removed_pieces': removed_pieces, 'visual_cut_line': visual_cut_line, 'split_line': split_line, 'measurements': measurements, 'quality': quality, 'parallel_cos': float(parallel_cos), 'distance_along_edge': float(distance_along_edge)}

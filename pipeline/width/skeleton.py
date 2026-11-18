@@ -486,14 +486,39 @@ def translate_edge_line(edge_line, dx, dy):
     return affinity.translate(edge_line, xoff=dx, yoff=dy)
 
 
-def score_edge_against_polygon_axis_by_dot(edge_line, polygon, skeleton_pad=5, skeleton_min_line_length=3.0, axis_simplify_tolerance=8.0, axis_min_segment_length=8.0, edge_step=10, max_match_distance=120, min_parallel_cos=0.75, distance_sigma=120.0, translation_pool=None):
+def score_edge_against_polygon_axis_by_dot(edge_line, polygon, skeleton_pad=5, skeleton_min_line_length=3.0, axis_simplify_tolerance=8.0, axis_min_segment_length=8.0, edge_step=10, max_match_distance=120, min_parallel_cos=0.75, distance_sigma=120.0, translation_pool=None, fixed_shift=None):
     skeleton_lines = build_polygon_skeleton_lines(polygon=polygon, pad=skeleton_pad, min_line_length=skeleton_min_line_length)
     axis_segments = approximate_axis_lines(skeleton_lines=skeleton_lines, simplify_tolerance=axis_simplify_tolerance, min_segment_length=axis_min_segment_length)
     if not axis_segments:
         axis_segments = skeleton_lines
     if not axis_segments:
         return {'axis_status': 'no_axis_segments', 'axis_score': 0.0, 'mean_dot': 0.0, 'coverage_ratio': 0.0, 'mean_distance': None, 'shift_dx': None, 'shift_dy': None, 'shift_length': None, 'shift_std': None, 'translated_edge': None, 'skeleton_lines': skeleton_lines, 'axis_segments': axis_segments, 'edge_segments': [], 'matches': []}
-    translation = estimate_best_global_translation_from_axis(edge_line=edge_line, axis_segments=axis_segments, edge_step=edge_step, max_candidate_distance=max_match_distance * 2.0, max_match_distance=max_match_distance, min_parallel_cos=min_parallel_cos, shift_cluster_radius=12, max_candidates=250, shift_length_weight=0.001, translation_pool=translation_pool)
+    if fixed_shift is None:
+        translation = estimate_best_global_translation_from_axis(edge_line=edge_line, axis_segments=axis_segments, edge_step=edge_step, max_candidate_distance=max_match_distance * 2.0, max_match_distance=max_match_distance, min_parallel_cos=min_parallel_cos, shift_cluster_radius=12, max_candidates=250, shift_length_weight=0.001, translation_pool=translation_pool)
+    else:
+        dx, dy = fixed_shift
+        evaluation = evaluate_translation_against_axis(
+            edge_line, axis_segments, dx, dy, edge_step=edge_step,
+            max_match_distance=max_match_distance, min_parallel_cos=min_parallel_cos,
+        )
+        if evaluation is None:
+            evaluation = {
+                'mean_distance': None,
+                'coverage_ratio': 0.0,
+                'mean_dot': 0.0,
+                'translated_edge': translate_edge_line(edge_line, dx, dy),
+                'edge_segments': [],
+                'matches': [],
+            }
+        translation = {
+            **evaluation,
+            'dx': dx,
+            'dy': dy,
+            'shift_length': math.hypot(dx, dy),
+            'shift_std': 0.0,
+            'global_score': 0.0,
+            'cluster_count': 1,
+        }
     if translation is None:
         dense_edge = densify_line(line=edge_line, step=edge_step)
         edge_segments = [] if dense_edge is None else split_line_to_segments(dense_edge)

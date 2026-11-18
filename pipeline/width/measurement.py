@@ -59,47 +59,6 @@ def iter_lines_from_intersection(geom):
             yield from iter_lines_from_intersection(part)
 
 
-def width_at_point_by_center_segment(polygon, center_point, direction, max_width):
-    vx, vy = direction
-    nx = -vy
-    ny = vx
-    cx = center_point.x
-    cy = center_point.y
-    p1 = (cx - nx * max_width, cy - ny * max_width)
-    p2 = (cx + nx * max_width, cy + ny * max_width)
-    full_normal_line = LineString([p1, p2])
-    intersection = full_normal_line.intersection(polygon)
-    if intersection.is_empty:
-        return (None, full_normal_line, intersection)
-    segments = list(iter_lines_from_intersection(intersection))
-    if not segments:
-        return (None, full_normal_line, intersection)
-    best_segment = None
-    best_distance = float('inf')
-    for segment in segments:
-        coords = list(segment.coords)
-        if len(coords) < 2:
-            continue
-        t_values = []
-        for x, y in coords:
-            dx = x - cx
-            dy = y - cy
-            t = dx * nx + dy * ny
-            t_values.append(t)
-        t_min = min(t_values)
-        t_max = max(t_values)
-        if t_min <= 0 <= t_max:
-            best_segment = segment
-            break
-        distance_to_center = min(abs(t_min), abs(t_max))
-        if distance_to_center < best_distance:
-            best_distance = distance_to_center
-            best_segment = segment
-    if best_segment is None:
-        return (None, full_normal_line, intersection)
-    return (best_segment.length, full_normal_line, best_segment)
-
-
 @dataclass(frozen=True)
 class MeasurementPlan:
     distances: np.ndarray
